@@ -24,6 +24,14 @@ grammar TerraformPlan
   end
 
   rule resource
+    # Modern format with resource block
+    header:resource_header "\n" ws? change:('~' / '-/+' / '-' / '+' / '<=')? ws? 'resource' ws '"' rtype:[^"]+ '"' ws '"' rname:[^"]+ '"' ws '{' "\n" attrs:modern_attribute_list ws? '}' {
+      def to_ast
+        header.to_ast.merge(attributes: attrs.to_ast)
+      end
+    }
+    /
+    # Old format
     header:resource_header "\n" attrs:attribute_list {
       def to_ast
         header.to_ast.merge(attributes: attrs.to_ast)
@@ -38,6 +46,25 @@ grammar TerraformPlan
   end
 
   rule resource_header
+    # Modern Terraform format: # module.foo.aws_instance.bar will be updated in-place
+    ws? '#' ws path:([\w.-]+ '.')* type:[a-zA-Z0-9_-]+ '.' name:[\S]+ ws 'will be' ws action:[^'\n']+ {
+      def to_ast
+        change_map = {
+          'updated in-place' => '~',
+          'created' => '+',
+          'destroyed' => '-',
+          'replaced' => '-/+',
+          'read during apply' => '<='
+        }
+        {
+          change: change_map[action.text_value.strip].to_sym,
+          resource_type: type.text_value,
+          resource_name: (path.text_value + name.text_value).chomp('.'),
+        }
+      end
+    }
+    /
+    # Old Terraform 0.11 format with reasons
     ws? change:('~' / '-/+' / '-' / '+' / '<=') ws type:[a-zA-Z0-9_-]+ '.' name:[\S]+ ws '(' reason1:[^)]+ ')' ws '(' reason2:[^)]+ ')' {
       def to_ast
         {
@@ -82,6 +109,70 @@ grammar TerraformPlan
     ws item:attribute {
       def to_ast
         item.to_ast
+      end
+    }
+  end
+
+  rule modern_attribute_list
+    item:modern_attribute attrs:modern_attribute_list {
+      def to_ast
+        item.to_ast.merge(attrs.to_ast)
+      end
+    }
+    /
+    item:modern_attribute {
+      def to_ast
+        item.to_ast
+      end
+    }
+    /
+    '' {
+      def to_ast
+        {}
+      end
+    }
+  end
+
+  rule modern_attribute
+    # Skip comment lines
+    ws? '#' [^\n]* "\n" {
+      def to_ast
+        {}
+      end
+    }
+    /
+    # Changed attribute: ~ name = old => new
+    ws? '~' ws name:[^ =]+ ws? '=' ws? old_val:(!'=>' .)* ws? '=>' ws? new_val:[^\n]+ "\n" {
+      def to_ast
+        { name.text_value => { value: "#{old_val.text_value.strip} => #{new_val.text_value.strip}" } }
+      end
+    }
+    /
+    # Added attribute: + name = value
+    ws? '+' ws name:[^ =]+ ws? '=' ws? value:[^\n]+ "\n" {
+      def to_ast
+        { name.text_value => { value: "=> #{value.text_value.strip}" } }
+      end
+    }
+    /
+    # Removed attribute: - name = value
+    ws? '-' ws name:[^ =]+ ws? '=' ws? value:[^\n]+ "\n" {
+      def to_ast
+        { name.text_value => { value: "#{value.text_value.strip} =>" } }
+      end
+    }
+    /
+    # Unchanged attribute: name = value
+    ws name:[^ =]+ ws? '=' ws? value:[^\n]+ "\n" {
+      def to_ast
+        { name.text_value => { value: value.text_value.strip } }
+      end
+    }
+    /
+    # Skip empty lines
+    ws? "\n" {
+      def to_ast
+        {}
       end
     }
   end
